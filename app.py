@@ -1,15 +1,18 @@
-# app.py (simple: POV opuesto, sin historial ni CPL en vivo)
+# app.py (corregido)
+# - Selector elige el **POV** (desde qué lado miras)
+# - SI eliges POV = Negras -> controlas **BLANCAS** (opuesto) pero vista **volteada**
+# - SI eliges POV = Blancas -> controlas **NEGRAS** (opuesto) pero vista **normal**
+# - Historial y CPL en vivo
 
-import sys, random
+import sys, atexit, random
 from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QComboBox, QFrame
+    QLabel, QComboBox, QCheckBox, QListWidget, QListWidgetItem, QFrame
 )
 from PySide6.QtSvgWidgets import QSvgWidget
-    # Nota: quitamos QCheckBox, QListWidget, QListWidgetItem
 from PySide6.QtGui import QIcon, QMouseEvent
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import Qt, QSize
 import qdarkstyle
 import chess, chess.engine, chess.svg
 
@@ -22,7 +25,7 @@ def resource_path(rel: str) -> str:
 
 ENGINE_PATH = resource_path("assets/stockfish/stockfish.exe")
 
-# ---------- modos CPL (para fuerza/estilo del motor) ----------
+# ---------- modos CPL ----------
 CPL_MODES = {
     "Perfecto (≈1)": {"depth": 18, "mpv": 4,  "target": 1,  "perfect": True},
     "CPL 15":        {"depth": 14, "mpv": 6,  "target": 15, "perfect": False},
@@ -34,7 +37,7 @@ engine = None
 SIZE = 560
 CELL = SIZE // 8
 
-# ---------- helpers evaluación (solo para el motor) ----------
+# ---------- utilidades de evaluación ----------
 def _score_to_cp(score: chess.engine.PovScore, pov_white: bool) -> int:
     s = score.white() if pov_white else score.black()
     if s.is_mate():
@@ -69,8 +72,8 @@ def engine_pick_move(board: chess.Board, mode_name: str):
     p = CPL_MODES[mode_name]
     lines = _multipv(board, depth=p["depth"], mpv=p["mpv"])
     if not lines:
-        res = engine.play(board, chess.engine.Limit(depth=p["depth"]))
-        mv = res.move if hasattr(res, "move") else res
+        mv = engine.play(board, chess.engine.Limit(depth=p["depth"]))
+        mv = mv.move if hasattr(mv, 'move') else mv
         return mv, 0
     if p["perfect"]:
         return lines[0][0], 0
@@ -85,22 +88,33 @@ class BoardWidget(QSvgWidget):
         self.board = chess.Board()
         self.origin = None
         self.mode = "CPL 30"
+        self.analysis_enabled = True
 
-        # POV vs color humano (controlas el opuesto al POV)
-        self.pov_color = chess.WHITE      # POV inicial = blancas
-        self.human_color = chess.BLACK    # control inicial = negras
-        self.flipped = False              # flipped si POV = negras
+        # Separar **POV** (vista) de **human_color** (quién juegas)
+        self.pov_color = chess.WHITE     # POV inicial = blancas
+        self.human_color = chess.BLACK   # control inicial = negras (opuesto al POV)
+        self.flipped = False             # flipped si POV = negras
+
+        # métricas CPL
+        self.cpl_sum_me = 0; self.cpl_cnt_me = 0
+        self.cpl_sum_engine = 0; self.cpl_cnt_engine = 0
 
         self.refresh()
 
     def set_pov_and_control(self, pov_color: chess.Color):
-        # POV = pov_color; tú controlas el opuesto
+        # POV = pov_color; tú controlas el OPUESTO
         self.pov_color = pov_color
         self.human_color = chess.BLACK if pov_color == chess.WHITE else chess.WHITE
         self.flipped = (self.pov_color == chess.BLACK)
         self.refresh()
 
-    # ---- conversión (x,y)->square según POV
+    # ---- CPL promedio
+    def avg_cpl_me(self):
+        return (self.cpl_sum_me / self.cpl_cnt_me) if self.cpl_cnt_me else 0.0
+    def avg_cpl_engine(self):
+        return (self.cpl_sum_engine / self.cpl_cnt_engine) if self.cpl_cnt_engine else 0.0
+
+    # ---- conversión (x,y)->square considerando flip (según POV)
     def _sq_from_xy(self, x, y):
         if self.flipped:
             return y * 8 + (7 - x)   # negras abajo
@@ -111,15 +125,15 @@ class BoardWidget(QSvgWidget):
         last_mv = self.board.peek() if self.board.move_stack else None
         squares = {}
         if self.origin is not None:
-            squares[self.origin] = "#ffd27f"  # selección (ámbar suave)
+            squares[self.origin] = "#ffcccc"
 
         svg = chess.svg.board(
             board=self.board,
-            flipped=self.flipped,
+            flipped=self.flipped,              # POV
             size=SIZE,
             lastmove=last_mv,
             squares=squares,
-            colors={"lastmove": "#4caf50"}  # último movimiento en verde suave
+            colors={"lastmove": "#ff6b6b"}
         )
         self.load(bytearray(svg, encoding="utf-8"))
 
@@ -133,7 +147,8 @@ class BoardWidget(QSvgWidget):
         if self.origin is None:
             self.origin = sq
             self.refresh()
-            self.parent().update_turn_highlight()
+            try: self.parent().update_turn_highlight()
+            except: pass
             return
         self._try_play(sq)
 
@@ -142,7 +157,8 @@ class BoardWidget(QSvgWidget):
         if self.board.turn != self.human_color:
             self.origin = None
             self.refresh()
-            self.parent().update_turn_highlight()
+            try: self.parent().update_turn_highlight()
+            except: pass
             return
 
         src = self.origin
@@ -159,84 +175,121 @@ class BoardWidget(QSvgWidget):
                 legal = mv in self.board.legal_moves
         if not legal:
             self.refresh()
-            self.parent().update_turn_highlight()
+            try: self.parent().update_turn_highlight()
+            except: pass
             return
 
-        # aplica MI jugada (sin CPL)
+        # CPL de MI jugada (si análisis activo)
+        my_cpl = 0
+        if self.analysis_enabled:
+            p = CPL_MODES[self.mode]
+            lines = _multipv(self.board, depth=p["depth"], mpv=max(6, p["mpv"]))
+            if lines:
+                best_cp = lines[0][1]
+                chosen_cp = None
+                for mv_i, cp_i in lines:
+                    if mv_i == mv:
+                        chosen_cp = cp_i; break
+                if chosen_cp is None:
+                    tmp = self.board.copy(); tmp.push(mv)
+                    info = engine.analyse(tmp, chess.engine.Limit(depth=p["depth"]))
+                    chosen_cp = -_score_to_cp(info["score"], pov_white=(tmp.turn == chess.WHITE))
+                my_cpl = max(0, best_cp - chosen_cp)
+
+        san = self.board.san(mv)
         self.board.push(mv)
+        if self.analysis_enabled:
+            self.cpl_sum_me += my_cpl; self.cpl_cnt_me += 1
+        try:
+            self.parent().rebuild_move_list_from_board()
+        except: pass
         self.refresh()
-        self.parent().update_turn_highlight()
+        try:
+            self.parent().update_turn_highlight()
+            self.parent().update_cpl_labels()
+        except: pass
 
         if self.board.is_game_over():
             return
 
-        # turno del motor
         self._engine_move_and_update()
 
     def _engine_move_and_update(self):
-        mv_e, _ = engine_pick_move(self.board, self.mode)
+        mv_e, cpl_e = engine_pick_move(self.board, self.mode)
+        san_e = self.board.san(mv_e)
         self.board.push(mv_e)
+        if self.analysis_enabled:
+            self.cpl_sum_engine += cpl_e; self.cpl_cnt_engine += 1
+        try:
+            self.parent().rebuild_move_list_from_board()
+        except: pass
         self.refresh()
-        self.parent().update_turn_highlight()
+        try:
+            self.parent().update_turn_highlight()
+            self.parent().update_cpl_labels()
+        except: pass
 
 # ---------- ventana ----------
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Ajedrez CPL")
+        self.setWindowTitle("Ajedrez CPL – Gabriel Golker")
         self.setWindowIcon(QIcon(resource_path("assets/app.png")))
 
-        # El selector controla el POV (vista). Tú controlas el opuesto.
+        # Selector controla el **POV** (vista). El control humano es el opuesto.
         self.pov_color = chess.WHITE
-        self.human_color = chess.BLACK
-        self.engine_color = chess.WHITE
+        self.human_color = chess.BLACK   # opuesto
+        self.engine_color = chess.WHITE  # el motor juega el POV
 
         self.board_frame = QFrame()
         self.board_frame.setFrameShape(QFrame.NoFrame)
         self.boardw = BoardWidget(parent=self)
         self.boardw.set_pov_and_control(self.pov_color)
 
-        # ------- controles mínimos -------
+        self.moves_list = QListWidget(); self.moves_list.setMinimumWidth(220)
         self.lbl_turn = QLabel("")
+        self.lbl_cpl_me = QLabel("CPL (Yo): 0.0")
+        self.lbl_cpl_engine = QLabel("CPL (Motor): 0.0")
+
         self.cmb_mode = QComboBox(); self.cmb_mode.addItems(CPL_MODES.keys()); self.cmb_mode.setCurrentText("CPL 30")
         self.cmb_side = QComboBox(); self.cmb_side.addItems(["Blancas (POV)", "Negras (POV)"])
         self.cmb_side.setCurrentText("Blancas (POV)")
+        self.chk_analysis = QCheckBox("Análisis (CPL en vivo)"); self.chk_analysis.setChecked(True)
 
         self.btn_undo = QPushButton("Deshacer (2 jugadas)")
         self.btn_reset = QPushButton("Reiniciar")
 
-        # top bar
         top = QHBoxLayout()
         top.addWidget(QLabel("CPL:")); top.addWidget(self.cmb_mode)
         top.addWidget(QLabel("POV:")); top.addWidget(self.cmb_side)
+        top.addWidget(self.chk_analysis)
         top.addStretch(1)
         top.addWidget(self.btn_undo); top.addWidget(self.btn_reset)
 
-        # layout tablero centrado
         bf_layout = QVBoxLayout(self.board_frame); bf_layout.setContentsMargins(8,8,8,8)
         bf_layout.addWidget(self.boardw, 0, Qt.AlignCenter)
 
-        # root
+        right = QVBoxLayout()
+        right.addWidget(QLabel("Historial"), 0, Qt.AlignTop)
+        right.addWidget(self.moves_list, 1)
+        right.addWidget(self.lbl_turn)
+        right.addWidget(self.lbl_cpl_me)
+        right.addWidget(self.lbl_cpl_engine)
+        right.addWidget(QLabel("© 2025 Gabriel Golker"), 0, Qt.AlignBottom)
+
         root = QVBoxLayout(self)
         root.addLayout(top)
-        root.addWidget(self.board_frame, 0, Qt.AlignCenter)
-        root.addWidget(self.lbl_turn)
+        mid = QHBoxLayout(); mid.addWidget(self.board_frame, 0, Qt.AlignCenter); mid.addLayout(right, 0)
+        root.addLayout(mid)
 
-        # señales
         self.cmb_mode.currentTextChanged.connect(self.on_mode_changed)
         self.cmb_side.currentTextChanged.connect(self.on_side_changed)
+        self.chk_analysis.stateChanged.connect(self.on_analysis_toggled)
         self.btn_undo.clicked.connect(self.on_undo_pair)
         self.btn_reset.clicked.connect(self.on_reset)
 
-        # tema oscuro
         self.setStyleSheet(qdarkstyle.load_stylesheet())
-
-        # estado inicial
-        self.update_turn_highlight()
-
-        # Si al iniciar es turno del motor (POV), que mueva primero
-        if len(self.boardw.board.move_stack) == 0 and self.boardw.board.turn == self.engine_color:
-            QTimer.singleShot(0, self.boardw._engine_move_and_update)
+        self.update_turn_highlight(); self.update_cpl_labels()
 
     # ---------- UI helpers ----------
     def update_turn_highlight(self):
@@ -247,45 +300,71 @@ class MainWindow(QWidget):
             self.lbl_turn.setText("Turno: Negras")
             self.board_frame.setStyleSheet("QFrame { background-color: #332014; border-radius: 10px; }")
 
+    def rebuild_move_list_from_board(self):
+        temp = chess.Board(); self.moves_list.clear()
+        for mv in self.boardw.board.move_stack:
+            san = temp.san(mv)
+            ply = len(temp.move_stack) + 1
+            move_num = (ply + 1) // 2
+            if ply % 2 == 1:
+                self.moves_list.addItem(QListWidgetItem(f"{move_num}. {san}"))
+            else:
+                last_row = self.moves_list.count() - 1
+                if last_row >= 0:
+                    item = self.moves_list.item(last_row)
+                    item.setText(item.text() + f"   {san}")
+                else:
+                    self.moves_list.addItem(QListWidgetItem(f"{move_num}. ... {san}"))
+            temp.push(mv)
+        self.moves_list.scrollToBottom()
+
+    def update_cpl_labels(self):
+        self.lbl_cpl_me.setText(f"CPL (Yo): {self.boardw.avg_cpl_me():.1f}")
+        self.lbl_cpl_engine.setText(f"CPL (Motor): {self.boardw.avg_cpl_engine():.1f}")
+
     # ---------- eventos ----------
     def on_mode_changed(self, v):
         self.boardw.mode = v
 
     def on_side_changed(self, v):
-        # Selector define el POV; tú controlas el opuesto
+        # El selector define el **POV**. El control humano es el OPUESTO.
         if v.startswith("Blancas"):
             self.pov_color = chess.WHITE
         else:
             self.pov_color = chess.BLACK
 
-        self.boardw.set_pov_and_control(self.pov_color)
-        self.human_color = self.boardw.human_color
+        self.human_color = chess.BLACK if self.pov_color == chess.WHITE else chess.WHITE
         self.engine_color = self.pov_color
 
-        # Si es inicio y es turno del motor (POV), que mueva primero
-        if len(self.boardw.board.move_stack) == 0 and self.boardw.board.turn == self.engine_color:
-            QTimer.singleShot(0, self.boardw._engine_move_and_update)
+        self.boardw.set_pov_and_control(self.pov_color)
 
-        self.update_turn_highlight()
+        # Si es el comienzo y le toca al motor (POV), que mueva primero
+        if len(self.boardw.board.move_stack) == 0 and self.boardw.board.turn == self.engine_color:
+            self.boardw._engine_move_and_update()
+
+        self.rebuild_move_list_from_board(); self.update_turn_highlight(); self.update_cpl_labels()
+
+    def on_analysis_toggled(self, state):
+        self.boardw.analysis_enabled = (state == Qt.Checked)
+        self.update_cpl_labels()
 
     def on_undo_pair(self):
-        # deshace 2 jugadas (motor y tuya) si existen
         for _ in range(2):
             if self.boardw.board.move_stack:
                 self.boardw.board.pop()
         self.boardw.origin = None
-        self.boardw.refresh()
-        self.update_turn_highlight()
+        self.rebuild_move_list_from_board(); self.boardw.refresh(); self.update_turn_highlight(); self.update_cpl_labels()
 
     def on_reset(self):
-        self.boardw.board = chess.Board()
-        self.boardw.origin = None
-        # mantener POV/roles
+        self.boardw.board = chess.Board(); self.boardw.origin = None
+        self.boardw.cpl_sum_me = self.boardw.cpl_sum_engine = 0
+        self.boardw.cpl_cnt_me = self.boardw.cpl_cnt_engine = 0
+        self.moves_list.clear()
+        # POV y control actuales se mantienen
         self.boardw.set_pov_and_control(self.pov_color)
-        self.boardw.refresh()
-        self.update_turn_highlight()
+        self.boardw.refresh(); self.update_turn_highlight(); self.update_cpl_labels()
         if self.boardw.board.turn == self.engine_color:
-            QTimer.singleShot(0, self.boardw._engine_move_and_update)
+            self.boardw._engine_move_and_update()
 
 # ---------- main ----------
 def main():
@@ -295,7 +374,7 @@ def main():
 
     app = QApplication(sys.argv)
     w = MainWindow()
-    w.resize(QSize(SIZE + 120, SIZE + 140))  # un poco más compacto
+    w.resize(QSize(SIZE + 300, SIZE + 180))
     w.show()
     ret = app.exec()
 
