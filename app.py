@@ -244,14 +244,7 @@ class MainWindow(QWidget):
         self.board_frame = QFrame()
         self.board_frame.setFrameShape(QFrame.NoFrame)
         self.boardw = BoardWidget(parent=self)
-        self.boardw.set_pov_and_control(self.pov_color)
-
-        self.moves_list = QListWidget(); self.moves_list.setMinimumWidth(220)
-        self.lbl_turn = QLabel("")
-        self.lbl_cpl_me = QLabel("CPL (Yo): 0.0")
-        self.lbl_cpl_engine = QLabel("CPL (Motor): 0.0")
-
-        self.cmb_mode = QComboBox(); self.cmb_mode.addItems(CPL_MODES.keys()); self.cmb_mode.setCurrentText("CPL 30")
+        self.boardw.set_pov_and_control(self.pov_color)self.cmb_mode = QComboBox(); self.cmb_mode.addItems(CPL_MODES.keys()); self.cmb_mode.setCurrentText("CPL 30")
         self.cmb_side = QComboBox(); self.cmb_side.addItems(["Blancas (POV)", "Negras (POV)"])
         self.cmb_side.setCurrentText("Blancas (POV)")
         self.chk_analysis = QCheckBox("Análisis (CPL en vivo)"); self.chk_analysis.setChecked(True)
@@ -270,12 +263,7 @@ class MainWindow(QWidget):
         bf_layout.addWidget(self.boardw, 0, Qt.AlignCenter)
 
         right = QVBoxLayout()
-        right.addWidget(QLabel("Historial"), 0, Qt.AlignTop)
-        right.addWidget(self.moves_list, 1)
-        right.addWidget(self.lbl_turn)
-        right.addWidget(self.lbl_cpl_me)
-        right.addWidget(self.lbl_cpl_engine)
-        right.addWidget(QLabel("© 2025 Gabriel Golker"), 0, Qt.AlignBottom)
+        right.addWidget(QLabel("© 2025 Gabriel Golker")), 0, Qt.AlignBottom)
 
         root = QVBoxLayout(self)
         root.addLayout(top)
@@ -289,39 +277,9 @@ class MainWindow(QWidget):
         self.btn_reset.clicked.connect(self.on_reset)
 
         self.setStyleSheet(qdarkstyle.load_stylesheet())
-        self.update_turn_highlight(); self.update_cpl_labels()
+        
 
     # ---------- UI helpers ----------
-    def update_turn_highlight(self):
-        if self.boardw.board.turn == chess.WHITE:
-            self.lbl_turn.setText("Turno: Blancas")
-            self.board_frame.setStyleSheet("QFrame { background-color: #142235; border-radius: 10px; }")
-        else:
-            self.lbl_turn.setText("Turno: Negras")
-            self.board_frame.setStyleSheet("QFrame { background-color: #332014; border-radius: 10px; }")
-
-    def rebuild_move_list_from_board(self):
-        temp = chess.Board(); self.moves_list.clear()
-        for mv in self.boardw.board.move_stack:
-            san = temp.san(mv)
-            ply = len(temp.move_stack) + 1
-            move_num = (ply + 1) // 2
-            if ply % 2 == 1:
-                self.moves_list.addItem(QListWidgetItem(f"{move_num}. {san}"))
-            else:
-                last_row = self.moves_list.count() - 1
-                if last_row >= 0:
-                    item = self.moves_list.item(last_row)
-                    item.setText(item.text() + f"   {san}")
-                else:
-                    self.moves_list.addItem(QListWidgetItem(f"{move_num}. ... {san}"))
-            temp.push(mv)
-        self.moves_list.scrollToBottom()
-
-    def update_cpl_labels(self):
-        self.lbl_cpl_me.setText(f"CPL (Yo): {self.boardw.avg_cpl_me():.1f}")
-        self.lbl_cpl_engine.setText(f"CPL (Motor): {self.boardw.avg_cpl_engine():.1f}")
-
     # ---------- eventos ----------
     def on_mode_changed(self, v):
         self.boardw.mode = v
@@ -342,18 +300,18 @@ class MainWindow(QWidget):
         if len(self.boardw.board.move_stack) == 0 and self.boardw.board.turn == self.engine_color:
             self.boardw._engine_move_and_update()
 
-        self.rebuild_move_list_from_board(); self.update_turn_highlight(); self.update_cpl_labels()
+        ; 
 
     def on_analysis_toggled(self, state):
         self.boardw.analysis_enabled = (state == Qt.Checked)
-        self.update_cpl_labels()
+        
 
     def on_undo_pair(self):
         for _ in range(2):
             if self.boardw.board.move_stack:
                 self.boardw.board.pop()
         self.boardw.origin = None
-        self.rebuild_move_list_from_board(); self.boardw.refresh(); self.update_turn_highlight(); self.update_cpl_labels()
+        ; self.boardw.refresh(); 
 
     def on_reset(self):
         self.boardw.board = chess.Board(); self.boardw.origin = None
@@ -362,7 +320,7 @@ class MainWindow(QWidget):
         self.moves_list.clear()
         # POV y control actuales se mantienen
         self.boardw.set_pov_and_control(self.pov_color)
-        self.boardw.refresh(); self.update_turn_highlight(); self.update_cpl_labels()
+        self.boardw.refresh(); 
         if self.boardw.board.turn == self.engine_color:
             self.boardw._engine_move_and_update()
 
@@ -384,3 +342,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
