@@ -1,4 +1,4 @@
-# app.py (POV opuesto + historial/CPL en vivo sin depender de "Deshacer")
+# app.py (POV opuesto + motor mueve cuando le toca + historial/CPL en vivo)
 
 import sys, random
 from pathlib import Path
@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtGui import QIcon, QMouseEvent
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 import qdarkstyle
 import chess, chess.engine, chess.svg
 
@@ -121,7 +121,7 @@ class BoardWidget(QSvgWidget):
         last_mv = self.board.peek() if self.board.move_stack else None
         squares = {}
         if self.origin is not None:
-            squares[self.origin] = "#ffcccc"
+            squares[self.origin] = "#ffd27f"  # selección (ámbar suave)
 
         svg = chess.svg.board(
             board=self.board,
@@ -129,7 +129,7 @@ class BoardWidget(QSvgWidget):
             size=SIZE,
             lastmove=last_mv,
             squares=squares,
-            colors={"lastmove": "#ff6b6b"}
+            colors={"lastmove": "#4caf50"}  # último movimiento en verde suave
         )
         self.load(bytearray(svg, encoding="utf-8"))
 
@@ -189,18 +189,18 @@ class BoardWidget(QSvgWidget):
                     chosen_cp = -_score_to_cp(info["score"], pov_white=(tmp.turn == chess.WHITE))
                 my_cpl = max(0, best_cp - chosen_cp)
 
-        san = self.board.san(mv)
         self.board.push(mv)
         if self.analysis_enabled:
             self.cpl_sum_me += my_cpl; self.cpl_cnt_me += 1
 
-        # UI full refresh SIEMPRE
+        # limpia selección y refresca UI
+        self.origin = None
         self.parent().ui_full_refresh()
 
         if self.board.is_game_over():
             return
 
-        # Motor
+        # Turno del motor
         self._engine_move_and_update()
 
     def _engine_move_and_update(self):
@@ -209,7 +209,8 @@ class BoardWidget(QSvgWidget):
         if self.analysis_enabled:
             self.cpl_sum_engine += cpl_e; self.cpl_cnt_engine += 1
 
-        # UI full refresh tras jugada del motor
+        # refresco completo
+        self.origin = None
         self.parent().ui_full_refresh()
 
 # ---------- ventana ----------
@@ -233,6 +234,7 @@ class MainWindow(QWidget):
         self.lbl_turn = QLabel("")
         self.lbl_cpl_me = QLabel("CPL (Yo): 0.0")
         self.lbl_cpl_engine = QLabel("CPL (Motor): 0.0")
+        self.lbl_you_play = QLabel("Tú controlas: Negras")
 
         self.cmb_mode = QComboBox(); self.cmb_mode.addItems(CPL_MODES.keys()); self.cmb_mode.setCurrentText("CPL 30")
         self.cmb_side = QComboBox(); self.cmb_side.addItems(["Blancas (POV)", "Negras (POV)"])
@@ -258,6 +260,7 @@ class MainWindow(QWidget):
         right.addWidget(self.lbl_turn)
         right.addWidget(self.lbl_cpl_me)
         right.addWidget(self.lbl_cpl_engine)
+        right.addWidget(self.lbl_you_play)
         right.addWidget(QLabel("© 2025 Gabriel Golker"), 0, Qt.AlignBottom)
 
         root = QVBoxLayout(self)
@@ -274,9 +277,12 @@ class MainWindow(QWidget):
         self.setStyleSheet(qdarkstyle.load_stylesheet())
         self.ui_full_refresh()
 
+        # <-- NUEVO: si arranca y es turno del motor (POV), que mueva
+        if len(self.boardw.board.move_stack) == 0 and self.boardw.board.turn == self.engine_color:
+            QTimer.singleShot(0, self.boardw._engine_move_and_update)
+
     # ---------- helpers de UI ----------
     def ui_turn_only(self):
-        # solo actualiza indicador de turno y marco
         if self.boardw.board.turn == chess.WHITE:
             self.lbl_turn.setText("Turno: Blancas")
             self.board_frame.setStyleSheet("QFrame { background-color: #142235; border-radius: 10px; }")
@@ -307,10 +313,13 @@ class MainWindow(QWidget):
         self.lbl_cpl_me.setText(f"CPL (Yo): {self.boardw.avg_cpl_me():.1f}")
         self.lbl_cpl_engine.setText(f"CPL (Motor): {self.boardw.avg_cpl_engine():.1f}")
 
+    def update_you_play_label(self):
+        self.lbl_you_play.setText(f"Tú controlas: {'Blancas' if self.boardw.human_color == chess.WHITE else 'Negras'}")
+
     def ui_full_refresh(self):
-        # refresco completo de UI (historial, labels, turno y tablero)
         self.rebuild_move_list_from_board()
         self.update_cpl_labels()
+        self.update_you_play_label()
         self.ui_turn_only()
         self.boardw.refresh()
         QApplication.processEvents()
@@ -326,14 +335,14 @@ class MainWindow(QWidget):
         else:
             self.pov_color = chess.BLACK
 
-        self.human_color = chess.BLACK if self.pov_color == chess.WHITE else chess.WHITE
+        # Sincroniza roles
+        self.boardw.set_pov_and_control(self.pov_color)
+        self.human_color = self.boardw.human_color
         self.engine_color = self.pov_color
 
-        self.boardw.set_pov_and_control(self.pov_color)
-
-        # Si es inicio y es turno del motor (POV), que mueva primero
+        # Si es inicio (o aún sin jugadas) y es turno del motor (POV), que mueva
         if len(self.boardw.board.move_stack) == 0 and self.boardw.board.turn == self.engine_color:
-            self.boardw._engine_move_and_update()
+            QTimer.singleShot(0, self.boardw._engine_move_and_update)
 
         self.ui_full_refresh()
 
@@ -353,11 +362,10 @@ class MainWindow(QWidget):
         self.boardw.origin = None
         self.boardw.cpl_sum_me = self.boardw.cpl_sum_engine = 0
         self.boardw.cpl_cnt_me = self.boardw.cpl_cnt_engine = 0
-        # Mantener POV y control
         self.boardw.set_pov_and_control(self.pov_color)
         self.ui_full_refresh()
         if self.boardw.board.turn == self.engine_color:
-            self.boardw._engine_move_and_update()
+            QTimer.singleShot(0, self.boardw._engine_move_and_update)
 
 # ---------- main ----------
 def main():
