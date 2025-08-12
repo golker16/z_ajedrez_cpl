@@ -233,7 +233,7 @@ class BoardWidget(QSvgWidget):
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Ajedrez CPL – Gabriel Golker")
+        self.setWindowTitle("Ajedrez CPL")
         self.setWindowIcon(QIcon(resource_path("assets/app.png")))
 
         # Selector controla el **POV** (vista). El control humano es el opuesto.
