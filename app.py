@@ -1,344 +1,291 @@
-# app.py (corregido)
-# - Selector elige el **POV** (desde qué lado miras)
-# - SI eliges POV = Negras -> controlas **BLANCAS** (opuesto) pero vista **volteada**
-# - SI eliges POV = Blancas -> controlas **NEGRAS** (opuesto) pero vista **normal**
-# - Historial y CPL en vivo
-
-import sys, atexit, random
+import os
+import sys
 from pathlib import Path
+import traceback
+
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QComboBox, QCheckBox, QListWidget, QListWidgetItem, QFrame
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QFileDialog, QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar,
+    QGroupBox, QLineEdit, QFormLayout, QMessageBox
 )
-from PySide6.QtSvgWidgets import QSvgWidget
-from PySide6.QtGui import QIcon, QMouseEvent
-from PySide6.QtCore import Qt, QSize
-import qdarkstyle
-import chess, chess.engine, chess.svg
 
-# ---------- recursos empaquetados ----------
-def resource_path(rel: str) -> str:
-    base = getattr(sys, "_MEIPASS", None)
-    if base:
-        return str(Path(base) / rel)
-    return str(Path(__file__).parent / rel)
+# Try to load QDarkStyle if available
+_HAS_QDARK = False
+try:
+    import qdarkstyle
+    _HAS_QDARK = True
+except Exception:
+    _HAS_QDARK = False
 
-ENGINE_PATH = resource_path("assets/stockfish/stockfish.exe")
+# Import processing engine
+try:
+    from engine import apply_envelopes
+except Exception as e:
+    def apply_envelopes(dest_path, mold_paths, out_path, cfg, progress_cb, log_cb):
+        log_cb("[WARN] engine.apply_envelopes not found, copying destination as dummy output.")
+        import shutil, time
+        total = max(1, len(mold_paths))
+        for i, p in enumerate(mold_paths, start=1):
+            time.sleep(0.1)
+            progress_cb(int(i * 80 / total))
+            log_cb(f"Using dummy mold: {Path(p).name}")
+        shutil.copy2(dest_path, out_path)
+        progress_cb(100)
+        log_cb(f"Done. (Output: {out_path})")
 
-# ---------- modos CPL ----------
-CPL_MODES = {
-    "Perfecto (≈1)": {"depth": 18, "mpv": 4,  "target": 1,  "perfect": True},
-    "CPL 15":        {"depth": 14, "mpv": 6,  "target": 15, "perfect": False},
-    "CPL 30":        {"depth": 12, "mpv": 8,  "target": 30, "perfect": False},
-    "CPL 40":        {"depth": 10, "mpv": 10, "target": 40, "perfect": False},
-}
+AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aiff', '.aif'}
 
-engine = None
-SIZE = 560
-CELL = SIZE // 8
+class Worker(QThread):
+    progressed = Signal(int)
+    logged = Signal(str)
+    finished_ok = Signal(str)
+    failed = Signal(str)
 
-# ---------- utilidades de evaluación ----------
-def _score_to_cp(score: chess.engine.PovScore, pov_white: bool) -> int:
-    s = score.white() if pov_white else score.black()
-    if s.is_mate():
-        return 100_000 if s.mate() and s.mate() > 0 else -100_000
-    return s.score()
+    def __init__(self, dest_path, mold_paths, out_path, cfg):
+        super().__init__()
+        self.dest_path = dest_path
+        self.mold_paths = mold_paths
+        self.out_path = out_path
+        self.cfg = cfg
 
-def _multipv(board: chess.Board, depth=12, mpv=6):
-    info = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=mpv)
-    pov_white = (board.turn == chess.WHITE)
-    lines = []
-    for i in info:
-        pv = i.get("pv"); sc = i.get("score")
-        if not pv or not sc:
-            continue
-        mv = pv[0]; cp = _score_to_cp(sc, pov_white)
-        lines.append((mv, cp))
-    lines.sort(key=lambda t: t[1], reverse=True)
-    return lines
-
-def _choose_by_target_cpl(lines, target_cpl: int):
-    best_cp = lines[0][1]
-    desired = max(0, int(random.gauss(target_cpl, max(4, target_cpl*0.25))))
-    pick, best_diff, picked_cp = lines[0][0], float("inf"), lines[0][1]
-    for mv, cp in lines:
-        delta = max(0, best_cp - cp)
-        diff = abs(delta - desired)
-        if diff < best_diff:
-            best_diff, pick, picked_cp = diff, mv, cp
-    return pick, max(0, best_cp - picked_cp)
-
-def engine_pick_move(board: chess.Board, mode_name: str):
-    p = CPL_MODES[mode_name]
-    lines = _multipv(board, depth=p["depth"], mpv=p["mpv"])
-    if not lines:
-        mv = engine.play(board, chess.engine.Limit(depth=p["depth"]))
-        mv = mv.move if hasattr(mv, 'move') else mv
-        return mv, 0
-    if p["perfect"]:
-        return lines[0][0], 0
-    mv, cpl = _choose_by_target_cpl(lines, p["target"])
-    return mv, cpl
-
-# ---------- tablero ----------
-class BoardWidget(QSvgWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(SIZE, SIZE)
-        self.board = chess.Board()
-        self.origin = None
-        self.mode = "CPL 30"
-        self.analysis_enabled = True
-
-        # Separar **POV** (vista) de **human_color** (quién juegas)
-        self.pov_color = chess.WHITE     # POV inicial = blancas
-        self.human_color = chess.BLACK   # control inicial = negras (opuesto al POV)
-        self.flipped = False             # flipped si POV = negras
-
-        # métricas CPL
-        self.cpl_sum_me = 0; self.cpl_cnt_me = 0
-        self.cpl_sum_engine = 0; self.cpl_cnt_engine = 0
-
-        self.refresh()
-
-    def set_pov_and_control(self, pov_color: chess.Color):
-        # POV = pov_color; tú controlas el OPUESTO
-        self.pov_color = pov_color
-        self.human_color = chess.BLACK if pov_color == chess.WHITE else chess.WHITE
-        self.flipped = (self.pov_color == chess.BLACK)
-        self.refresh()
-
-    # ---- CPL promedio
-    def avg_cpl_me(self):
-        return (self.cpl_sum_me / self.cpl_cnt_me) if self.cpl_cnt_me else 0.0
-    def avg_cpl_engine(self):
-        return (self.cpl_sum_engine / self.cpl_cnt_engine) if self.cpl_cnt_engine else 0.0
-
-    # ---- conversión (x,y)->square considerando flip (según POV)
-    def _sq_from_xy(self, x, y):
-        if self.flipped:
-            return y * 8 + (7 - x)   # negras abajo
-        return (7 - y) * 8 + x       # blancas abajo
-
-    # ---- render + resaltados
-    def refresh(self):
-        last_mv = self.board.peek() if self.board.move_stack else None
-        squares = {}
-        if self.origin is not None:
-            squares[self.origin] = "#ffcccc"
-
-        svg = chess.svg.board(
-            board=self.board,
-            flipped=self.flipped,              # POV
-            size=SIZE,
-            lastmove=last_mv,
-            squares=squares,
-            colors={"lastmove": "#ff6b6b"}
-        )
-        self.load(bytearray(svg, encoding="utf-8"))
-
-    # ---- input de mouse
-    def mousePressEvent(self, e: QMouseEvent):
-        if e.button() != Qt.LeftButton:
-            return
-        x = int(e.position().x()) // CELL
-        y = int(e.position().y()) // CELL
-        sq = self._sq_from_xy(x, y)
-        if self.origin is None:
-            self.origin = sq
-            self.refresh()
-            try: self.parent().update_turn_highlight()
-            except: pass
-            return
-        self._try_play(sq)
-
-    # ---- intento de jugada (humano)
-    def _try_play(self, dst_sq):
-        if self.board.turn != self.human_color:
-            self.origin = None
-            self.refresh()
-            try: self.parent().update_turn_highlight()
-            except: pass
-            return
-
-        src = self.origin
-        self.origin = None
-        if src is None:
-            return
-
-        mv = chess.Move(src, dst_sq)
-        legal = mv in self.board.legal_moves
-        if not legal and self.board.piece_at(src) and self.board.piece_at(src).piece_type == chess.PAWN:
-            rank = chess.square_rank(dst_sq)
-            if rank in (0, 7):
-                mv = chess.Move(src, dst_sq, promotion=chess.QUEEN)
-                legal = mv in self.board.legal_moves
-        if not legal:
-            self.refresh()
-            try: self.parent().update_turn_highlight()
-            except: pass
-            return
-
-        # CPL de MI jugada (si análisis activo)
-        my_cpl = 0
-        if self.analysis_enabled:
-            p = CPL_MODES[self.mode]
-            lines = _multipv(self.board, depth=p["depth"], mpv=max(6, p["mpv"]))
-            if lines:
-                best_cp = lines[0][1]
-                chosen_cp = None
-                for mv_i, cp_i in lines:
-                    if mv_i == mv:
-                        chosen_cp = cp_i; break
-                if chosen_cp is None:
-                    tmp = self.board.copy(); tmp.push(mv)
-                    info = engine.analyse(tmp, chess.engine.Limit(depth=p["depth"]))
-                    chosen_cp = -_score_to_cp(info["score"], pov_white=(tmp.turn == chess.WHITE))
-                my_cpl = max(0, best_cp - chosen_cp)
-
-        san = self.board.san(mv)
-        self.board.push(mv)
-        if self.analysis_enabled:
-            self.cpl_sum_me += my_cpl; self.cpl_cnt_me += 1
+    def run(self):
         try:
-            self.parent().rebuild_move_list_from_board()
-        except: pass
-        self.refresh()
-        try:
-            self.parent().update_turn_highlight()
-            self.parent().update_cpl_labels()
-        except: pass
+            def _p(v): self.progressed.emit(int(v))
+            def _l(msg): self.logged.emit(str(msg))
+            _l("Starting processing…")
+            apply_envelopes(self.dest_path, self.mold_paths, self.out_path, self.cfg, _p, _l)
+            self.finished_ok.emit(self.out_path)
+        except Exception as e:
+            tb = traceback.format_exc()
+            self.failed.emit(tb)
 
-        if self.board.is_game_over():
-            return
+class DropList(QListWidget):
+    def __init__(self, allow_multiple=True):
+        super().__init__()
+        self.setAcceptDrops(True)
+        self.allow_multiple = allow_multiple
+        self.setMinimumHeight(120)
+        self.setAlternatingRowColors(True)
 
-        self._engine_move_and_update()
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
 
-    def _engine_move_and_update(self):
-        mv_e, cpl_e = engine_pick_move(self.board, self.mode)
-        san_e = self.board.san(mv_e)
-        self.board.push(mv_e)
-        if self.analysis_enabled:
-            self.cpl_sum_engine += cpl_e; self.cpl_cnt_engine += 1
-        try:
-            self.parent().rebuild_move_list_from_board()
-        except: pass
-        self.refresh()
-        try:
-            self.parent().update_turn_highlight()
-            self.parent().update_cpl_labels()
-        except: pass
+    def dragMoveEvent(self, e):
+        e.acceptProposedAction()
 
-# ---------- ventana ----------
-class MainWindow(QWidget):
+    def dropEvent(self, e):
+        for url in e.mimeData().urls():
+            p = Path(url.toLocalFile())
+            if p.is_dir():
+                for child in sorted(p.iterdir()):
+                    if child.suffix.lower() in AUDIO_EXTS:
+                        self._add_path(child)
+            else:
+                if p.suffix.lower() in AUDIO_EXTS:
+                    self._add_path(p)
+        e.acceptProposedAction()
+
+    def _add_path(self, p: Path):
+        if not self.allow_multiple:
+            self.clear()
+        it = QListWidgetItem(str(p))
+        self.addItem(it)
+
+    def paths(self):
+        out = []
+        for i in range(self.count()):
+            out.append(self.item(i).text())
+        return out
+
+class MainWin(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Ajedrez CPL – Gabriel Golker")
-        self.setWindowIcon(QIcon(resource_path("assets/app.png")))
+        self.setWindowTitle("Copy Envelope")
 
-        # Selector controla el **POV** (vista). El control humano es el opuesto.
-        self.pov_color = chess.WHITE
-        self.human_color = chess.BLACK   # opuesto
-        self.engine_color = chess.WHITE  # el motor juega el POV
-
-        self.board_frame = QFrame()
-        self.board_frame.setFrameShape(QFrame.NoFrame)
-        self.boardw = BoardWidget(parent=self)
-        self.boardw.set_pov_and_control(self.pov_color)self.cmb_mode = QComboBox(); self.cmb_mode.addItems(CPL_MODES.keys()); self.cmb_mode.setCurrentText("CPL 30")
-        self.cmb_side = QComboBox(); self.cmb_side.addItems(["Blancas (POV)", "Negras (POV)"])
-        self.cmb_side.setCurrentText("Blancas (POV)")
-        self.chk_analysis = QCheckBox("Análisis (CPL en vivo)"); self.chk_analysis.setChecked(True)
-
-        self.btn_undo = QPushButton("Deshacer (2 jugadas)")
-        self.btn_reset = QPushButton("Reiniciar")
-
-        top = QHBoxLayout()
-        top.addWidget(QLabel("CPL:")); top.addWidget(self.cmb_mode)
-        top.addWidget(QLabel("POV:")); top.addWidget(self.cmb_side)
-        top.addWidget(self.chk_analysis)
-        top.addStretch(1)
-        top.addWidget(self.btn_undo); top.addWidget(self.btn_reset)
-
-        bf_layout = QVBoxLayout(self.board_frame); bf_layout.setContentsMargins(8,8,8,8)
-        bf_layout.addWidget(self.boardw, 0, Qt.AlignCenter)
-
-        right = QVBoxLayout()
-        right.addWidget(QLabel("© 2025 Gabriel Golker")), 0, Qt.AlignBottom)
+        # Optional window icon if present (user can add assets/app.png later)
+        icon_path = Path("assets/app.png")  # PNG for window icon
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
 
         root = QVBoxLayout(self)
-        root.addLayout(top)
-        mid = QHBoxLayout(); mid.addWidget(self.board_frame, 0, Qt.AlignCenter); mid.addLayout(right, 0)
-        root.addLayout(mid)
 
-        self.cmb_mode.currentTextChanged.connect(self.on_mode_changed)
-        self.cmb_side.currentTextChanged.connect(self.on_side_changed)
-        self.chk_analysis.stateChanged.connect(self.on_analysis_toggled)
-        self.btn_undo.clicked.connect(self.on_undo_pair)
-        self.btn_reset.clicked.connect(self.on_reset)
+        # Description text
+        desc = QLabel("""
+        <b>Descripción</b><br>
+        Este programa toma uno o varios audios “molde” y extrae su
+        envolvente de volumen (la curva de subidas y bajadas de intensidad)
+        para aplicarla sobre otro audio “destino”.
+        """.strip())
+        desc.setWordWrap(True)
+        root.addWidget(desc)
 
-        self.setStyleSheet(qdarkstyle.load_stylesheet())
-        
+        copyright = QLabel("© 2025 Gabriel Golker")
+        root.addWidget(copyright)
 
-    # ---------- UI helpers ----------
-    # ---------- eventos ----------
-    def on_mode_changed(self, v):
-        self.boardw.mode = v
+        # Mold group
+        g_molds = QGroupBox("Moldes (arrastra archivos sueltos o una carpeta)")
+        lm = QVBoxLayout(g_molds)
+        self.mold_list = DropList(allow_multiple=True)
+        lm.addWidget(self.mold_list)
 
-    def on_side_changed(self, v):
-        # El selector define el **POV**. El control humano es el OPUESTO.
-        if v.startswith("Blancas"):
-            self.pov_color = chess.WHITE
-        else:
-            self.pov_color = chess.BLACK
+        btns_m = QHBoxLayout()
+        btn_add_files = QPushButton("Añadir archivos…")
+        btn_add_folder = QPushButton("Añadir carpeta…")
+        btn_clear_m = QPushButton("Limpiar")
+        btns_m.addWidget(btn_add_files)
+        btns_m.addWidget(btn_add_folder)
+        btns_m.addWidget(btn_clear_m)
+        lm.addLayout(btns_m)
 
-        self.human_color = chess.BLACK if self.pov_color == chess.WHITE else chess.WHITE
-        self.engine_color = self.pov_color
+        btn_add_files.clicked.connect(self.pick_mold_files)
+        btn_add_folder.clicked.connect(self.pick_mold_folder)
+        btn_clear_m.clicked.connect(self.mold_list.clear)
 
-        self.boardw.set_pov_and_control(self.pov_color)
+        root.addWidget(g_molds)
 
-        # Si es el comienzo y le toca al motor (POV), que mueva primero
-        if len(self.boardw.board.move_stack) == 0 and self.boardw.board.turn == self.engine_color:
-            self.boardw._engine_move_and_update()
+        # Destination
+        g_dest = QGroupBox("Destino (arrastra o elige un archivo)")
+        ld = QVBoxLayout(g_dest)
+        self.dest_list = DropList(allow_multiple=False)
+        ld.addWidget(self.dest_list)
+        btn_dest = QPushButton("Elegir destino…")
+        btn_clear_d = QPushButton("Limpiar")
+        bdh = QHBoxLayout()
+        bdh.addWidget(btn_dest)
+        bdh.addWidget(btn_clear_d)
+        ld.addLayout(bdh)
+        btn_dest.clicked.connect(self.pick_dest_file)
+        btn_clear_d.clicked.connect(self.dest_list.clear)
+        root.addWidget(g_dest)
 
-        ; 
+        # Quick config
+        g_cfg = QGroupBox("Configuración rápida")
+        lf = QFormLayout(g_cfg)
+        self.ed_bpm = QLineEdit("100")
+        self.ed_attack = QLineEdit("1.0")
+        self.ed_release = QLineEdit("0.5")
+        self.ed_floor_db = QLineEdit("-40.0")
+        self.ed_mode = QLineEdit("hilbert")  # 'hilbert' or 'rms'
+        self.ed_combine = QLineEdit("max")   # max/mean/geom_mean/product/sum_limited/weighted
+        self.ed_weights = QLineEdit("")      # optional: comma-separated weights
+        self.ed_out = QLineEdit(str(Path.cwd() / "salida.wav"))
+        lf.addRow("BPM:", self.ed_bpm)
+        lf.addRow("Attack ms:", self.ed_attack)
+        lf.addRow("Release ms:", self.ed_release)
+        lf.addRow("Floor dB:", self.ed_floor_db)
+        lf.addRow("Envelope mode:", self.ed_mode)
+        lf.addRow("Combine mode:", self.ed_combine)
+        lf.addRow("Weights (coma):", self.ed_weights)
+        lf.addRow("Archivo de salida:", self.ed_out)
+        root.addWidget(g_cfg)
 
-    def on_analysis_toggled(self, state):
-        self.boardw.analysis_enabled = (state == Qt.Checked)
-        
+        # Progress & Logs
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        root.addWidget(self.progress)
 
-    def on_undo_pair(self):
-        for _ in range(2):
-            if self.boardw.board.move_stack:
-                self.boardw.board.pop()
-        self.boardw.origin = None
-        ; self.boardw.refresh(); 
+        self.logs = QPlainTextEdit()
+        self.logs.setReadOnly(True)
+        self.logs.setMaximumBlockCount(5000)
+        root.addWidget(self.logs)
 
-    def on_reset(self):
-        self.boardw.board = chess.Board(); self.boardw.origin = None
-        self.boardw.cpl_sum_me = self.boardw.cpl_sum_engine = 0
-        self.boardw.cpl_cnt_me = self.boardw.cpl_cnt_engine = 0
-        self.moves_list.clear()
-        # POV y control actuales se mantienen
-        self.boardw.set_pov_and_control(self.pov_color)
-        self.boardw.refresh(); 
-        if self.boardw.board.turn == self.engine_color:
-            self.boardw._engine_move_and_update()
+        # Action buttons
+        hb = QHBoxLayout()
+        self.btn_run = QPushButton("Procesar")
+        self.btn_run.clicked.connect(self.on_run)
+        hb.addWidget(self.btn_run)
+        root.addLayout(hb)
 
-# ---------- main ----------
+        self.worker = None
+
+    def append_log(self, text):
+        self.logs.appendPlainText(text)
+
+    def pick_mold_files(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Elegir moldes", str(Path.cwd()),
+                                               "Audio (*.wav *.mp3 *.flac *.ogg *.m4a *.aiff *.aif)")
+        for f in files:
+            self.mold_list._add_path(Path(f))
+
+    def pick_mold_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Elegir carpeta de moldes", str(Path.cwd()))
+        if folder:
+            for child in sorted(Path(folder).iterdir()):
+                if child.suffix.lower() in AUDIO_EXTS:
+                    self.mold_list._add_path(child)
+
+    def pick_dest_file(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Elegir destino", str(Path.cwd()),
+                                          "Audio (*.wav *.mp3 *.flac *.ogg *.m4a *.aiff *.aif)")
+        if f:
+            self.dest_list._add_path(Path(f))
+
+    def on_run(self):
+        molds = self.mold_list.paths()
+        if not molds:
+            QMessageBox.warning(self, "Faltan moldes", "Agrega al menos un molde (archivo o carpeta).")
+            return
+        dests = self.dest_list.paths()
+        if not dests:
+            QMessageBox.warning(self, "Falta destino", "Elige el archivo destino.")
+            return
+        dest = dests[0]
+        out = self.ed_out.text().strip()
+        if not out:
+            QMessageBox.warning(self, "Falta salida", "Especifica el archivo de salida (ej: salida.wav).")
+            return
+
+        weights = None
+        wtxt = self.ed_weights.text().strip()
+        if wtxt:
+            try:
+                weights = [float(x) for x in wtxt.split(",")]
+            except Exception:
+                QMessageBox.warning(self, "Weights inválidos", "Usa números separados por coma, ej: 1,0.8,1.2")
+                return
+
+        cfg = {
+            "bpm": float(self.ed_bpm.text() or 100),
+            "attack_ms": float(self.ed_attack.text() or 1.0),
+            "release_ms": float(self.ed_release.text() or 0.5),
+            "floor_db": float(self.ed_floor_db.text() or -40.0),
+            "mode": (self.ed_mode.text() or "hilbert").strip().lower(),
+            "combine_mode": (self.ed_combine.text() or "max").strip().lower(),
+            "weights": weights,
+            "match_lufs": False,
+        }
+
+        self.progress.setValue(0)
+        self.logs.clear()
+
+        self.worker = Worker(dest, molds, out, cfg)
+        self.worker.progressed.connect(self.progress.setValue)
+        self.worker.logged.connect(self.append_log)
+        self.worker.finished_ok.connect(self.on_done)
+        self.worker.failed.connect(self.on_fail)
+        self.worker.start()
+
+    def on_done(self, out_path):
+        self.append_log(f"OK: {out_path}")
+        QMessageBox.information(self, "Listo", f"Se generó: {out_path}")
+
+    def on_fail(self, tb):
+        self.append_log(tb)
+        QMessageBox.critical(self, "Error", "Ocurrió un error. Revisa los logs.")
+
 def main():
-    global engine
-    engine = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH)
-    engine.configure({"Threads": 2, "Hash": 256})
-
     app = QApplication(sys.argv)
-    w = MainWindow()
-    w.resize(QSize(SIZE + 300, SIZE + 180))
-    w.show()
-    ret = app.exec()
-
-    try: engine.quit()
-    except: pass
-    sys.exit(ret)
+    if _HAS_QDARK:
+        app.setStyleSheet(qdarkstyle.load_stylesheet_pyside6())
+    win = MainWin()
+    win.resize(900, 760)
+    win.show()
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
