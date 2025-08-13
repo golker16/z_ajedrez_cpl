@@ -288,7 +288,13 @@ class MainWindow(QWidget):
         self.lbl_cpl_me = QLabel("CPL (Yo): 0.0")
         self.lbl_cpl_engine = QLabel("CPL (Motor): 0.0")
 
-        self.cmb_mode = QComboBox(); self.cmb_mode.addItems(CPL_MODES.keys()); self.cmb_mode.setCurrentText("CPL 30")
+        self.cmb_mode = QComboBox()
+        try:
+            _mode_keys = list(CPL_MODES.keys())
+        except AttributeError:
+            _mode_keys = [str(x) for x in CPL_MODES]
+        self.cmb_mode.addItems(_mode_keys)
+        self.cmb_mode.setCurrentText("CPL 30")
         self.cmb_side = QComboBox(); self.cmb_side.addItems(["Blancas (POV)", "Negras (POV)"])
         self.cmb_side.setCurrentText("Blancas (POV)")
         self.chk_analysis = QCheckBox("Análisis (CPL en vivo)"); self.chk_analysis.setChecked(True)
