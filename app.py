@@ -28,19 +28,34 @@ ENGINE_PATH = resource_path("assets/stockfish/stockfish.exe")
 # ---------- modos CPL ----------
 CPL_MODES = {
     "Perfecto (≈1)": {"depth": 18, "mpv": 4,  "target": 1,  "perfect": True},
+
+    # Rango “muy preciso”
+    "CPL 15": {"depth": 14, "mpv": 6, "target": 15, "perfect": False},
+    "CPL 20": {"depth": 13, "mpv": 7, "target": 20, "perfect": False},
+    "CPL 25": {"depth": 13, "mpv": 8, "target": 25, "perfect": False},
+    "CPL 30": {"depth": 12, "mpv": 8, "target": 30, "perfect": False},
+    "CPL 35": {"depth": 12, "mpv": 9, "target": 35, "perfect": False},
+
+    # Rango medio (buena naturalidad/velocidad)
+    "CPL 40": {"depth": 10, "mpv": 10, "target": 40, "perfect": False},
+    "CPL 45": {"depth": 10, "mpv": 11, "target": 45, "perfect": False},
+    "CPL 50": {"depth": 10, "mpv": 12, "target": 50, "perfect": False},
+
+    # Rango medio-alto (afinado para que el target sea estable)
+    "CPL 55": {"depth": 11, "mpv": 13, "target": 55, "perfect": False},
+    "CPL 60": {"depth": 11, "mpv": 14, "target": 60, "perfect": False},
+    "CPL 65": {"depth": 11, "mpv": 15, "target": 65, "perfect": False},
+
+    # Alto (más opciones para elegir jugadas “peores”)
+    "CPL 70": {"depth": 8, "mpv": 16, "target": 70, "perfect": False},
+},
     "CPL 15":        {"depth": 14, "mpv": 6,  "target": 15, "perfect": False},
     "CPL 30":        {"depth": 12, "mpv": 8,  "target": 30, "perfect": False},
-    "CPL 35":        {"depth": 12, "mpv": 9,  "target": 35, "perfect": False},
     "CPL 40":        {"depth": 10, "mpv": 10, "target": 40, "perfect": False},
-    "CPL 45":        {"depth": 10, "mpv": 11, "target": 45, "perfect": False},
-    "CPL 50":        {"depth": 10, "mpv": 12, "target": 50, "perfect": False},
-    "CPL 55":        {"depth": 9,  "mpv": 13, "target": 55, "perfect": False},
-    "CPL 60":        {"depth": 9,  "mpv": 14, "target": 60, "perfect": False},
-    "CPL 65":        {"depth": 9,  "mpv": 15, "target": 65, "perfect": False},
-    "CPL 70":        {"depth": 8,  "mpv": 16, "target": 70, "perfect": False},
 }
 
 engine = None
+LAST_ENGINE_CPL = 0  # memoria corta del motor (tilt)
 SIZE = 560
 CELL = SIZE // 8
 
@@ -64,9 +79,27 @@ def _multipv(board: chess.Board, depth=12, mpv=6):
     lines.sort(key=lambda t: t[1], reverse=True)
     return lines
 
-def _choose_by_target_cpl(lines, target_cpl: int):
+def _choose_by_target_cpl(lines, target_cpl: int, last_engine_cpl: int = 0):
+    # mejor evaluación disponible para el bando al turno
     best_cp = lines[0][1]
-    desired = max(0, int(random.gauss(target_cpl, max(4, target_cpl*0.25))))
+    spread = best_cp - (lines[-1][1] if len(lines) > 1 else best_cp)
+
+    # sigma dinámica: más grande en targets altos, posiciones complejas y tras blunder (tilt)
+    sigma = max(4, int(target_cpl * (0.25 if target_cpl < 60 else 0.35)))
+    sigma += min(30, int(spread * 0.10))  # complejidad de la posición
+    if last_engine_cpl >= 120:            # venimos de error grande
+        sigma += 20
+
+    desired = max(0, int(random.gauss(target_cpl, sigma)))
+
+    # Satisficing: acepto la primera lo bastante cercana al objetivo
+    epsilon = max(3, int(target_cpl * 0.10))  # tolerancia
+    for mv, cp in lines:
+        delta = max(0, best_cp - cp)
+        if delta >= max(0, desired - epsilon):
+            return mv, delta
+
+    # Fallback: elige la más cercana (comportamiento original)
     pick, best_diff, picked_cp = lines[0][0], float("inf"), lines[0][1]
     for mv, cp in lines:
         delta = max(0, best_cp - cp)
@@ -74,20 +107,21 @@ def _choose_by_target_cpl(lines, target_cpl: int):
         if diff < best_diff:
             best_diff, pick, picked_cp = diff, mv, cp
     return pick, max(0, best_cp - picked_cp)
-
 def engine_pick_move(board: chess.Board, mode_name: str):
+    global LAST_ENGINE_CPL
     p = CPL_MODES[mode_name]
     lines = _multipv(board, depth=p["depth"], mpv=p["mpv"])
     if not lines:
         mv = engine.play(board, chess.engine.Limit(depth=p["depth"]))
         mv = mv.move if hasattr(mv, 'move') else mv
+        LAST_ENGINE_CPL = 0
         return mv, 0
     if p["perfect"]:
+        LAST_ENGINE_CPL = 0
         return lines[0][0], 0
-    mv, cpl = _choose_by_target_cpl(lines, p["target"])
+    mv, cpl = _choose_by_target_cpl(lines, p["target"], LAST_ENGINE_CPL)
+    LAST_ENGINE_CPL = cpl
     return mv, cpl
-
-# ---------- tablero ----------
 class BoardWidget(QSvgWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
