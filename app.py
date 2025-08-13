@@ -29,25 +29,8 @@ ENGINE_PATH = resource_path("assets/stockfish/stockfish.exe")
 CPL_MODES = {
     "Perfecto (≈1)": {"depth": 18, "mpv": 4,  "target": 1,  "perfect": True},
     "CPL 15":        {"depth": 14, "mpv": 6,  "target": 15, "perfect": False},
-    # Rango “muy preciso”
-    "CPL 15":        {"depth": 14, "mpv": 6, "target": 15, "perfect": False},
-    "CPL 20":        {"depth": 13, "mpv": 7, "target": 20, "perfect": False},
-    "CPL 25":        {"depth": 13, "mpv": 8, "target": 25, "perfect": False},
-    "CPL 30":        {"depth": 12, "mpv": 8, "target": 30, "perfect": False},
-    "CPL 35":        {"depth": 12, "mpv": 9, "target": 35, "perfect": False},
-
-    # Rango medio (buena naturalidad/velocidad)
+    "CPL 30":        {"depth": 12, "mpv": 8,  "target": 30, "perfect": False},
     "CPL 40":        {"depth": 10, "mpv": 10, "target": 40, "perfect": False},
-    "CPL 45":        {"depth": 10, "mpv": 11, "target": 45, "perfect": False},
-    "CPL 50":        {"depth": 10, "mpv": 12, "target": 50, "perfect": False},
-
-    # Rango medio-alto (afinado para que el target sea estable)
-    "CPL 55":        {"depth": 11, "mpv": 13, "target": 55, "perfect": False},
-    "CPL 60":        {"depth": 11, "mpv": 14, "target": 60, "perfect": False},
-    "CPL 65":        {"depth": 11, "mpv": 15, "target": 65, "perfect": False},
-
-    # Alto (más opciones para elegir jugadas “peores”)
-    "CPL 70":        {"depth": 8, "mpv": 16, "target": 70, "perfect": False},
 }
 
 engine = None
