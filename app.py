@@ -49,10 +49,6 @@ CPL_MODES = {
     # Alto (más opciones para elegir jugadas “peores”)
     "CPL 70": {"depth": 8, "mpv": 16, "target": 70, "perfect": False},
 },
-    "CPL 15":        {"depth": 14, "mpv": 6,  "target": 15, "perfect": False},
-    "CPL 30":        {"depth": 12, "mpv": 8,  "target": 30, "perfect": False},
-    "CPL 40":        {"depth": 10, "mpv": 10, "target": 40, "perfect": False},
-}
 
 engine = None
 LAST_ENGINE_CPL = 0  # memoria corta del motor (tilt)
