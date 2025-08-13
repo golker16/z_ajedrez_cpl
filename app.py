@@ -30,7 +30,14 @@ CPL_MODES = {
     "Perfecto (≈1)": {"depth": 18, "mpv": 4,  "target": 1,  "perfect": True},
     "CPL 15":        {"depth": 14, "mpv": 6,  "target": 15, "perfect": False},
     "CPL 30":        {"depth": 12, "mpv": 8,  "target": 30, "perfect": False},
+    "CPL 35":        {"depth": 12, "mpv": 9,  "target": 35, "perfect": False},
     "CPL 40":        {"depth": 10, "mpv": 10, "target": 40, "perfect": False},
+    "CPL 45":        {"depth": 10, "mpv": 11, "target": 45, "perfect": False},
+    "CPL 50":        {"depth": 10, "mpv": 12, "target": 50, "perfect": False},
+    "CPL 55":        {"depth": 9,  "mpv": 13, "target": 55, "perfect": False},
+    "CPL 60":        {"depth": 9,  "mpv": 14, "target": 60, "perfect": False},
+    "CPL 65":        {"depth": 9,  "mpv": 15, "target": 65, "perfect": False},
+    "CPL 70":        {"depth": 8,  "mpv": 16, "target": 70, "perfect": False},
 }
 
 engine = None
